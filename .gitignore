@@ -12,6 +12,7 @@
 *.dylib
 
 # Executables
+bwa
 *.exe
 *.out
 *.app
