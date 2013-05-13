@@ -75,7 +75,48 @@ int bwt_cal_width(const bwt_t *bwt, int len, const ubyte_t *str, bwt_width_t *wi
 	return bid;
 }
 
-void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
+#ifdef HAVE_PTHREAD
+typedef struct {
+	int    tid;
+   bwt_t *bwt;
+	int   *n_seqs;
+	bwa_seq_t **seqs;
+   const char *fn_fa;
+   const char *prefix;
+	const gap_opt_t *opt;
+   pthread_barrier_t *barrier;
+} thread_aux_t;
+
+__thread bwt_t thrdbwt;
+
+static void *worker(void *data)
+{
+	thread_aux_t *d = (thread_aux_t*)data;
+	bwa_cal_sa_reg_gap1(d->prefix, d->barrier, d->tid, d->n_seqs, d->seqs, d->fn_fa, d->opt);
+ /*
+	thread_aux_t *d = (thread_aux_t*)data;
+   memcpy(&thrdbwt,d->bwt,sizeof(bwt_t));
+	bwa_cal_sa_reg_gap(d->tid, &thrdbwt, d->n_seqs, d->seqs, d->opt);
+  */
+	return 0;
+}
+#endif
+
+bwa_seqio_t *bwa_open_reads(int mode, const char *fn_fa)
+{
+   bwa_seqio_t *ks;
+   if (mode & BWA_MODE_BAM) { // open BAM
+      int which = 0;
+      if (mode & BWA_MODE_BAM_SE) which |= 4;
+      if (mode & BWA_MODE_BAM_READ1) which |= 1;
+      if (mode & BWA_MODE_BAM_READ2) which |= 2;
+      if (which == 0) which = 7; // then read all reads
+      ks = bwa_bam_open(fn_fa, which);
+   } else ks = bwa_seq_open(fn_fa);
+   return ks;
+}
+
+static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, const gap_opt_t *opt)
 {
 	int i, j, max_l = 0, max_len;
 	gap_stack_t *stack;
@@ -118,51 +159,15 @@ void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t *seqs, 
 	gap_destroy_stack(stack);
 }
 
-#ifdef HAVE_PTHREAD
-typedef struct {
-	int tid;
+static volatile int iter_count;
+
+void bwa_cal_sa_reg_gap1(const char *prefix, pthread_barrier_t *barrier, int tid, int *n_seqs, bwa_seq_t **seqs, const char *fn_fa, const gap_opt_t *opt)
+{
 	bwt_t *bwt;
-	int n_seqs;
-	bwa_seq_t *seqs;
-	const gap_opt_t *opt;
-} thread_aux_t;
-
-__thread bwt_t thrdbwt;
-
-static void *worker(void *data)
-{
-	thread_aux_t *d = (thread_aux_t*)data;
-	bwa_cal_sa_reg_gap(d->tid, d->bwt, d->n_seqs, d->seqs, d->opt);
- /*
-	thread_aux_t *d = (thread_aux_t*)data;
-   memcpy(&thrdbwt,d->bwt,sizeof(bwt_t));
-	bwa_cal_sa_reg_gap(d->tid, &thrdbwt, d->n_seqs, d->seqs, d->opt);
-  */
-	return 0;
-}
-#endif
-
-bwa_seqio_t *bwa_open_reads(int mode, const char *fn_fa)
-{
 	bwa_seqio_t *ks;
-	if (mode & BWA_MODE_BAM) { // open BAM
-		int which = 0;
-		if (mode & BWA_MODE_BAM_SE) which |= 4;
-		if (mode & BWA_MODE_BAM_READ1) which |= 1;
-		if (mode & BWA_MODE_BAM_READ2) which |= 2;
-		if (which == 0) which = 7; // then read all reads
-		ks = bwa_bam_open(fn_fa, which);
-	} else ks = bwa_seq_open(fn_fa);
-	return ks;
-}
+	int i, j, size_seqs = 0;
 
-void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
-{
-	int i, n_seqs, tot_seqs = 0, num_seqs = 0;
-	bwa_seq_t *seqs = NULL;
-	bwa_seqio_t *ks;
-	clock_t t;
-	bwt_t *bwt;
+   iter_count = 0;
 
 	// initialization
 	ks = bwa_open_reads(opt->mode, fn_fa);
@@ -173,58 +178,96 @@ void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
 		free(str);
 	}
 
-	// core loop
-	err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
-	while ((n_seqs = bwa_read_seq1(ks, &seqs, &num_seqs, 0x40000, opt->mode, opt->trim_qual)) != 0) {
-      if (n_seqs > num_seqs)
-         num_seqs = n_seqs;
-		tot_seqs += n_seqs;
-		t = clock();
+   if (!tid) {
+	   // core loop - write this only once
+	   err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
+   }
 
-		//fprintf(stderr, "[bwa_aln_core] calculate SA coordinate... ");
+   // all threads must synchronize here
+	pthread_barrier_wait(barrier);
 
-#ifdef HAVE_PTHREAD
-		if (opt->n_threads <= 1) { // no multi-threading at all
-			bwa_cal_sa_reg_gap(0, bwt, n_seqs, seqs, opt);
-		} else {
-			pthread_t *tid;
-			pthread_attr_t attr;
-			thread_aux_t *data;
-			int j;
-			pthread_attr_init(&attr);
-			pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-			data = (thread_aux_t*)calloc(opt->n_threads, sizeof(thread_aux_t));
-			tid = (pthread_t*)calloc(opt->n_threads, sizeof(pthread_t));
-			for (j = 0; j < opt->n_threads; ++j) {
-				data[j].tid = j; data[j].bwt = bwt;
-				data[j].n_seqs = n_seqs; data[j].seqs = seqs; data[j].opt = opt;
-				pthread_create(&tid[j], &attr, worker, data + j);
-			}
-			for (j = 0; j < opt->n_threads; ++j) pthread_join(tid[j], 0);
-			free(data); free(tid);
-		}
-#else
-		bwa_cal_sa_reg_gap(0, bwt, n_seqs, seqs, opt);
-#endif
+	while ((n_seqs[tid] = bwa_read_seq(ks, iter_count, tid, opt->n_threads, &seqs[tid], &size_seqs, opt->mode, opt->trim_qual)) != 0) {
+      // call the original bwa_cal_sa_reg_gap function to process the read inputs
+      bwa_cal_sa_reg_gap(tid, bwt, n_seqs[tid], seqs[tid], opt);
 
-		//fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+      // barrier required here --- every thread but the first which has to write
+	   if(tid) pthread_barrier_wait(barrier);
 
-		t = clock();
-		//fprintf(stderr, "[bwa_aln_core] write to the disk... ");
-		for (i = 0; i < n_seqs; ++i) {
-			bwa_seq_t *p = seqs + i;
-			err_fwrite(&p->n_aln, 4, 1, stdout);
-			if (p->n_aln) err_fwrite(p->aln, sizeof(bwt_aln1_t), p->n_aln, stdout);
-		}
-		//fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+      if (!tid) {
+         // first thread writes all the output to maintain order
+   		for (i = 0; i < opt->n_threads; ++i) {
+            if (!n_seqs[i])
+              continue;
+            for (j = 0; j < n_seqs[i]; ++j) {
+		   	   bwa_seq_t *p = seqs[i] + j;
+	   	   	err_fwrite(&p->n_aln, 4, 1, stdout);
+   	   		if (p->n_aln) err_fwrite(p->aln, sizeof(bwt_aln1_t), p->n_aln, stdout);
+            }
+            // barrier required here
+	         pthread_barrier_wait(barrier);
+   		}
+         ++iter_count;
+      }
 
-		//fprintf(stderr, "[bwa_aln_core] %d sequences have been processed.\n", tot_seqs);
+      // all threads must synchronize here!
+	   pthread_barrier_wait(barrier);
 	}
 
 	// destroy
-	bwa_free_read_seq(num_seqs, seqs);
+	bwa_free_read_seq(size_seqs, seqs[tid]);
 	bwt_destroy(bwt);
 	bwa_seq_close(ks);
+}
+
+void bwa_aln_core(const char *prefix, const char *fn_fa, const gap_opt_t *opt)
+{
+	clock_t t;
+   int *n_seqs;
+   bwa_seq_t **seqs;
+
+	t = clock();
+
+	//fprintf(stderr, "[bwa_aln_core] calculate SA coordinate... ");
+
+#ifdef HAVE_PTHREAD
+   // if (opt->n_threads < 1) opt->n_threads = 1;
+   n_seqs = (int*) calloc (opt->n_threads, sizeof(int));
+   seqs   = (bwa_seq_t**) calloc (opt->n_threads, sizeof(bwa_seq_t*));
+	if (opt->n_threads >= 1) { // no multi-threading at all
+		pthread_t *tid;
+		pthread_attr_t attr;
+		thread_aux_t *data;
+      pthread_barrier_t barrier;
+		int j;
+      pthread_barrier_init(&barrier, NULL, opt->n_threads);
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+		data = (thread_aux_t*)calloc(opt->n_threads, sizeof(thread_aux_t));
+		tid = (pthread_t*)calloc(opt->n_threads, sizeof(pthread_t));
+		for (j = 0; j < opt->n_threads; ++j) {
+			data[j].tid = j; data[j].fn_fa = fn_fa; data[j].prefix = prefix;
+			data[j].n_seqs = n_seqs; data[j].seqs = seqs; data[j].opt = opt; data[j].barrier = &barrier;
+			pthread_create(&tid[j], &attr, worker, data + j);
+		}
+		for (j = 0; j < opt->n_threads; ++j) pthread_join(tid[j], 0);
+      pthread_barrier_destroy(&barrier);
+		free(data); free(tid);
+	}
+   free(n_seqs);
+   free(seqs);
+#else
+	//bwa_cal_sa_reg_gap(0, bwt, n_seqs, seqs, opt);
+	fprintf(stderr, "Compile with pthreads enabled\n");
+   abort();
+#endif
+
+	//fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+
+	t = clock();
+	//fprintf(stderr, "[bwa_aln_core] write to the disk... ");
+	//fprintf(stderr, "%.2f sec\n", (float)(clock() - t) / CLOCKS_PER_SEC); t = clock();
+
+	//fprintf(stderr, "[bwa_aln_core] %d sequences have been processed.\n", tot_seqs);
 }
 
 char *bwa_infer_prefix(const char *hint)

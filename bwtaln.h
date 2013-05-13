@@ -133,8 +133,9 @@ extern "C" {
 	bwa_seqio_t *bwa_bam_open(const char *fn, int which);
 	void bwa_seq_close(bwa_seqio_t *bs);
 	void seq_reverse(int len, ubyte_t *seq, int is_comp);
-	bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, int n_needed, int *n, int mode, int trim_qual);
-	int bwa_read_seq1(bwa_seqio_t *bs, bwa_seq_t **seqs, int *n_avail, int n_needed, int mode, int trim_qual);
+	// bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, int n_needed, int *n, int mode, int trim_qual);
+   int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seqs, int *n_avail, int mode, int trim_qual);
+   void bwa_cal_sa_reg_gap1(const char *prefix, pthread_barrier_t *barrier, int tid, int *n_seqs, bwa_seq_t **seqs, const char *fn_fa, const gap_opt_t *opt);
 	void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs);
 
 	int bwa_cal_maxdiff(int l, double err, double thres);
