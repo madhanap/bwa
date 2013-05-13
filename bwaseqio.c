@@ -5,7 +5,7 @@
 #include "bamlite.h"
 
 #include "kseq.h"
-KSEQ_INIT(gzFile, gzread)
+KSEQ_INIT(gzFile, gzread, gzseek)
 
 extern unsigned char nst_nt4_table[256];
 static char bam_nt16_nt4_table[] = { 4, 0, 1, 4, 2, 4, 4, 4, 3, 4, 4, 4, 4, 4, 4, 4 };
@@ -128,7 +128,7 @@ static bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_com
 	}
 	*n = n_seqs;
 	if (n_seqs && trim_qual >= 1)
-		fprintf(stderr, "[bwa_read_seq] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
+		fprintf(stderr, "[bwa_read_bam] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
 	if (n_seqs == 0) {
 		free(seqs);
 		bam_destroy1(b);
@@ -138,9 +138,94 @@ static bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_com
 	return seqs;
 }
 
+#define READ_SEQ_SIZE 4096
+
 #define BARCODE_LOW_QUAL 13
 
-   static int ks_getuntil1(kstream_t *ks, int delimiter, kstring_t *str, int *dret)
+inline static void init_bwa_seq_t(bwa_seq_t *p)
+{
+   if(p->cigar) free(p->cigar);
+   if(p->multi) free(p->multi);
+   p->n_multi = p->n_cigar = 0;
+   if(p->md) free(p->md);
+   p->md = 0;
+   p->sa = p->pos = 0;
+   p->c1 = p->c2 = p->seQ = 0;
+   p->nm = 0;
+   p->strand = p->type = p->dummy = p->extra_flag = 0;
+   p->n_mm = p->n_gapo = p->n_gape = p->mapQ = 0;
+   p->score = 0;
+   return;
+}
+
+   static void move_to_start(kstream_t *ks, int iter, int tid, int thrds)
+   {
+      char *buf = ks->buf;
+      int i = 0;
+      char tbuf[READ_IND_SIZE];
+      if (buf[0] != '@') {
+         for (i = 0; (buf[i] != '\n') || (buf[i+1] != '@'); ++i) {
+            // break if end
+            if (i == ks->end) {
+fprintf(stderr, "Entering here!!!\n");
+               ks->end = 0;
+               return;
+            }
+         }
+      }
+      else {
+         char c = '\n';
+         // check if the previous character was '\n'
+         if (iter || tid) {
+            gzseek(ks->f, ((iter*thrds)+tid)*READ_SIZE - READ_IND_SIZE, SEEK_SET);
+            gzread(ks->f, tbuf, READ_IND_SIZE);
+            c = tbuf[READ_IND_SIZE-1];
+         }
+         i = -1;
+         if (c != '\n') {
+            for (i = 0; (buf[i] != '\n') || (buf[i+1] != '@'); ++i) {
+               // break if end
+               if (i == ks->end) {
+fprintf(stderr, "Entering here!!!\n");
+                  ks->end = 0;
+                  return;
+               }
+            }
+         }
+      }
+      // begin points to the @ on the first char (first line) of the sequence
+      ks->begin = i + 1;
+      // check if the next line also starts with '@'
+      while ((buf[++i] != '\n') && (i < ks->end));
+      if (buf[i+1] == '@')
+       ks->begin = i + 1;
+      return;
+   }
+
+   static int ks_getc1(kstream_t *ks, int iter, int tid, int thrds, bool *first)
+   {
+      if (ks->is_eof && ks->begin >= ks->end) return -1;
+      if (*first) {
+         gzseek(ks->f, ((iter*thrds)+tid)*READ_SIZE, SEEK_SET);
+         *first = false;
+         ks->begin = 0;
+         ks->atend = false;
+         ks->end = gzread(ks->f, ks->buf, READ_SIZE);
+     //    move_to_start(ks, iter, tid, thrds);
+         if (ks->end < READ_SIZE) ks->is_eof = 1;
+         if (ks->end == 0) return -1;
+      }
+      else if (ks->begin >= ks->end) {
+         ks->begin = 0;
+         ks->atend = true;
+         ks->end = gzread(ks->f, ks->buf, READ_IND_SIZE);
+         if (ks->end < READ_IND_SIZE) ks->is_eof = 1;
+         if (ks->end == 0) return -1;
+      }
+      return (int)ks->buf[ks->begin++];
+   }
+
+   static int ks_getuntil1(kstream_t *ks, int delimiter, kstring_t *str, int *dret, int iter, int tid, int thrds, bool *first)
    {
       if (dret) *dret = 0;
       str->l = 0;
@@ -148,12 +233,21 @@ static bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_com
       for (;;) {
          int i;
          if (ks->begin >= ks->end) {
-            if (!ks->is_eof) {
+            if (*first) {
+               gzseek(ks->f, ((iter*thrds)+tid)*READ_SIZE, SEEK_SET);
+               *first = false;
+               ks->atend = false;
                ks->begin = 0;
-               ks->end = __read(ks->f, ks->buf, 4096);
-               if (ks->end < 4096) ks->is_eof = 1;
-               //ks->end = __read(ks->f, ks->buf, __bufsize);
-               //if (ks->end < __bufsize) ks->is_eof = 1;
+               ks->end = gzread(ks->f, ks->buf, READ_SIZE);
+       //        move_to_start(ks, iter, tid, thrds);
+               if (ks->end < READ_SIZE) ks->is_eof = 1;
+               if (ks->end == 0) return -1;
+            }
+            else if (!ks->is_eof) {
+               ks->begin = 0;
+               ks->atend = true;
+               ks->end = gzread(ks->f, ks->buf, READ_IND_SIZE);
+               if (ks->end < READ_IND_SIZE) ks->is_eof = 1;
                if (ks->end == 0) break;
             } else break;
          }
@@ -181,74 +275,53 @@ static bwa_seq_t *bwa_read_bam(bwa_seqio_t *bs, int n_needed, int *n, int is_com
       return str->l;
    }
 
-
-/* Return value:
-   >=0  length of the sequence (normal)
-   -1   end-of-file
-   -2   truncated quality string
- */
-static int kseq_read1(kseq_t *seq)
-{
-   int c;
-   kstream_t *ks = seq->f;
-   if (seq->last_char == 0) { /* then jump to the next header line */
-      while ((c = ks_getc(ks)) != -1 && c != '>' && c != '@');
-      if (c == -1) return -1; /* end of file */
-      seq->last_char = c;
-   } /* the first header char has been read */
-   seq->comment.l = seq->seq.l = seq->qual.l = 0;
-   if (ks_getuntil(ks, 0, &seq->name, &c) < 0) return -1;
-   if (c != '\n') ks_getuntil(ks, '\n', &seq->comment, 0);
-   while ((c = ks_getc(ks)) != -1 && c != '>' && c != '+' && c != '@') {
-      if (isgraph(c)) { /* printable non-space character */
-         if (seq->seq.l + 1 >= seq->seq.m) { /* double the memory */
-            seq->seq.m = seq->seq.l + 2;
-            kroundup32(seq->seq.m); /* rounded to next closest 2^k */
-            seq->seq.s = (char*)realloc(seq->seq.s, seq->seq.m);
+   static int kseq_read1(kseq_t *seq, int iter, int tid, int thrds, bool *first)
+   {
+      int c;
+      kstream_t *ks = seq->f;
+      if (seq->last_char == 0) { /* then jump to the next header line */
+         while ((c = ks_getc1(ks, iter, tid, thrds, first)) != -1 && c != '>' && c != '@');
+         if (c == -1) return -1; /* end of file */
+         seq->last_char = c;
+      } /* the first header char has been read */
+      seq->comment.l = seq->seq.l = seq->qual.l = 0;
+      if (ks_getuntil1(ks, 0, &seq->name, &c, iter, tid, thrds, first) < 0) return -1;
+      if (c != '\n') ks_getuntil1(ks, '\n', &seq->comment, 0, iter, tid, thrds, first);
+      while ((c = ks_getc1(ks, iter, tid, thrds, first)) != -1 && c != '>' && c != '+' && c != '@') {
+         if (isgraph(c)) { /* printable non-space character */
+            if (seq->seq.l + 1 >= seq->seq.m) { /* double the memory */
+               seq->seq.m = seq->seq.l + 2;
+               kroundup32(seq->seq.m); /* rounded to next closest 2^k */
+               seq->seq.s = (char*)realloc(seq->seq.s, seq->seq.m);
+            }
+            seq->seq.s[seq->seq.l++] = (char)c;
          }
-         seq->seq.s[seq->seq.l++] = (char)c;
       }
+      if (c == '>' || c == '@') seq->last_char = c; /* the first header char has been read */
+      seq->seq.s[seq->seq.l] = 0;   /* null terminated string */
+      if (c != '+') return seq->seq.l; /* FASTA */
+      if (seq->qual.m < seq->seq.m) {  /* allocate enough memory */
+         seq->qual.m = seq->seq.m;
+         seq->qual.s = (char*)realloc(seq->qual.s, seq->qual.m);
+      }
+      while ((c = ks_getc1(ks, iter, tid, thrds, first)) != -1 && c != '\n'); /* skip the rest of '+' line */
+      if (c == -1) return -2; /* we should not stop here */
+      while ((c = ks_getc1(ks, iter, tid, thrds, first)) != -1 && seq->qual.l < seq->seq.l)
+         if (c >= 33 && c <= 127) seq->qual.s[seq->qual.l++] = (unsigned char)c;
+      seq->qual.s[seq->qual.l] = 0; /* null terminated string */
+      seq->last_char = 0;  /* we have not come to the next header line */
+      if (seq->seq.l != seq->qual.l) return -2; /* qual string is shorter than seq string */
+      return seq->seq.l;
    }
-   if (c == '>' || c == '@') seq->last_char = c; /* the first header char has been read */
-   seq->seq.s[seq->seq.l] = 0;   /* null terminated string */
-   if (c != '+') return seq->seq.l; /* FASTA */
-   if (seq->qual.m < seq->seq.m) {  /* allocate enough memory */
-      seq->qual.m = seq->seq.m;
-      seq->qual.s = (char*)realloc(seq->qual.s, seq->qual.m);
-   }
-   while ((c = ks_getc(ks)) != -1 && c != '\n'); /* skip the rest of '+' line */
-   if (c == -1) return -2; /* we should not stop here */
-   while ((c = ks_getc(ks)) != -1 && seq->qual.l < seq->seq.l)
-      if (c >= 33 && c <= 127) seq->qual.s[seq->qual.l++] = (unsigned char)c;
-   seq->qual.s[seq->qual.l] = 0; /* null terminated string */
-   seq->last_char = 0;  /* we have not come to the next header line */
-   if (seq->seq.l != seq->qual.l) return -2; /* qual string is shorter than seq string */
-   return seq->seq.l;
-}
 
-inline static void init_bwa_seq_t(bwa_seq_t *p)
-{
-   if(p->cigar) free(p->cigar);
-   if(p->multi) free(p->multi);
-   p->n_multi = p->n_cigar = 0;
-   if(p->md) free(p->md);
-   p->md = 0;
-   p->sa = p->pos = 0;
-   p->c1 = p->c2 = p->seQ = 0;
-   p->nm = 0;
-   p->strand = p->type = p->dummy = p->extra_flag = 0;
-   p->n_mm = p->n_gapo = p->n_gape = p->mapQ = 0;
-   p->score = 0;
-   return;
-}
-
-int bwa_read_seq1(bwa_seqio_t *bs, bwa_seq_t **_seqs, int *n_avail, int n_needed, int mode, int trim_qual)
+int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seqs, int *n_avail, int mode, int trim_qual)
 {
 	bwa_seq_t *p;
    bwa_seq_t *seqs = *_seqs;
 	kseq_t *seq = bs->ks;
 	int n_seqs, l, i, is_comp = mode&BWA_MODE_COMPREAD, is_64 = mode&BWA_MODE_IL13, l_bc = mode>>24;
 	long n_trimmed = 0, n_tot = 0;
+   bool first;
 
 	if (l_bc > BWA_MAX_BCLEN) {
 		fprintf(stderr, "[%s] the maximum barcode length is %d.\n", __func__, BWA_MAX_BCLEN);
@@ -260,15 +333,15 @@ int bwa_read_seq1(bwa_seqio_t *bs, bwa_seq_t **_seqs, int *n_avail, int n_needed
       // return bwa_read_bam(bs, n_needed, n, is_comp, trim_qual); // l_bc has no effect for BAM input
       exit(0);
    }
-   if (*n_avail < n_needed) {
- //fprintf(stderr, "Allocating memory\n");
+   if (*n_avail == 0) {
       if (*n_avail) bwa_free_read_seq(*n_avail, seqs);
-	   seqs = (bwa_seq_t*)calloc(n_needed, sizeof(bwa_seq_t));
+	   seqs = (bwa_seq_t*)calloc(READ_SEQ_SIZE, sizeof(bwa_seq_t));
       *_seqs = seqs;
-      *n_avail = n_needed;
+      *n_avail = READ_SEQ_SIZE;
    }
 	n_seqs = 0;
-	while ((l = kseq_read1(seq)) >= 0) {
+   first = true;
+	while ((l = kseq_read1(seq, iter, tid, thrds, &first)) >= 0) {
 		if ((mode & BWA_MODE_CFY) && (seq->comment.l != 0)) {
 			// skip reads that are marked to be filtered by Casava
 			char *s = index(seq->comment.s, ':');
@@ -280,6 +353,10 @@ int bwa_read_seq1(bwa_seqio_t *bs, bwa_seq_t **_seqs, int *n_avail, int n_needed
 			for (i = 0; i < seq->qual.l; ++i) seq->qual.s[i] -= 31;
 		if (seq->seq.l <= l_bc) continue; // sequence length equals or smaller than the barcode length
 		p = &seqs[n_seqs++];
+      if(n_seqs > READ_SEQ_SIZE) {
+         fprintf (stderr, "READ_SEQ_SIZE not big enough\n");
+         abort();
+      }
       init_bwa_seq_t(p);
 		if (l_bc) { // then trim barcode
 			for (i = 0; i < l_bc; ++i)
@@ -320,83 +397,12 @@ int bwa_read_seq1(bwa_seqio_t *bs, bwa_seq_t **_seqs, int *n_avail, int n_needed
 			int t = strlen(p->name);
 			if (t > 2 && p->name[t-2] == '/' && (p->name[t-1] == '1' || p->name[t-1] == '2')) p->name[t-2] = '\0';
 		}
-		if (n_seqs == n_needed) break;
+		//if (n_seqs == n_needed) break;
+		if(kseq_end(seq)) break;
 	}
 	if (n_seqs && trim_qual >= 1)
 		fprintf(stderr, "[bwa_read_seq] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
 	return n_seqs;
-}
-
-bwa_seq_t *bwa_read_seq(bwa_seqio_t *bs, int n_needed, int *n, int mode, int trim_qual)
-{
-	bwa_seq_t *seqs, *p;
-	kseq_t *seq = bs->ks;
-	int n_seqs, l, i, is_comp = mode&BWA_MODE_COMPREAD, is_64 = mode&BWA_MODE_IL13, l_bc = mode>>24;
-	long n_trimmed = 0, n_tot = 0;
-
-	if (l_bc > BWA_MAX_BCLEN) {
-		fprintf(stderr, "[%s] the maximum barcode length is %d.\n", __func__, BWA_MAX_BCLEN);
-		return 0;
-	}
-	if (bs->is_bam) return bwa_read_bam(bs, n_needed, n, is_comp, trim_qual); // l_bc has no effect for BAM input
-	n_seqs = 0;
-	seqs = (bwa_seq_t*)calloc(n_needed, sizeof(bwa_seq_t));
-	while ((l = kseq_read1(seq)) >= 0) {
-		if ((mode & BWA_MODE_CFY) && (seq->comment.l != 0)) {
-			// skip reads that are marked to be filtered by Casava
-			char *s = index(seq->comment.s, ':');
-			if (s && *(++s) == 'Y') {
-				continue;
-			}
-		}
-		if (is_64 && seq->qual.l)
-			for (i = 0; i < seq->qual.l; ++i) seq->qual.s[i] -= 31;
-		if (seq->seq.l <= l_bc) continue; // sequence length equals or smaller than the barcode length
-		p = &seqs[n_seqs++];
-		if (l_bc) { // then trim barcode
-			for (i = 0; i < l_bc; ++i)
-				p->bc[i] = (seq->qual.l && seq->qual.s[i]-33 < BARCODE_LOW_QUAL)? tolower(seq->seq.s[i]) : toupper(seq->seq.s[i]);
-			p->bc[i] = 0;
-			for (; i < seq->seq.l; ++i)
-				seq->seq.s[i - l_bc] = seq->seq.s[i];
-			seq->seq.l -= l_bc; seq->seq.s[seq->seq.l] = 0;
-			if (seq->qual.l) {
-				for (i = l_bc; i < seq->qual.l; ++i)
-					seq->qual.s[i - l_bc] = seq->qual.s[i];
-				seq->qual.l -= l_bc; seq->qual.s[seq->qual.l] = 0;
-			}
-			l = seq->seq.l;
-		} else p->bc[0] = 0;
-		p->tid = -1; // no assigned to a thread
-		p->qual = 0;
-		p->full_len = p->clip_len = p->len = l;
-		n_tot += p->full_len;
-		p->seq = (ubyte_t*)calloc(p->len, 1);
-		for (i = 0; i != p->full_len; ++i)
-			p->seq[i] = nst_nt4_table[(int)seq->seq.s[i]];
-		if (seq->qual.l) { // copy quality
-			p->qual = (ubyte_t*)strdup((char*)seq->qual.s);
-			if (trim_qual >= 1) n_trimmed += bwa_trim_read(trim_qual, p);
-		}
-		p->rseq = (ubyte_t*)calloc(p->full_len, 1);
-		memcpy(p->rseq, p->seq, p->len);
-		seq_reverse(p->len, p->seq, 0); // *IMPORTANT*: will be reversed back in bwa_refine_gapped()
-		seq_reverse(p->len, p->rseq, is_comp);
-		p->name = strdup((const char*)seq->name.s);
-		{ // trim /[12]$
-			int t = strlen(p->name);
-			if (t > 2 && p->name[t-2] == '/' && (p->name[t-1] == '1' || p->name[t-1] == '2')) p->name[t-2] = '\0';
-		}
-		if (n_seqs == n_needed) break;
-	}
-	*n = n_seqs;
-	if (n_seqs && trim_qual >= 1)
-		fprintf(stderr, "[bwa_read_seq] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
-	if (n_seqs == 0) {
-		free(seqs);
-		return 0;
-	}
-	return seqs;
 }
 
 void bwa_free_read_seq(int n_seqs, bwa_seq_t *seqs)
