@@ -167,7 +167,6 @@ inline static void init_bwa_seq_t(bwa_seq_t *p)
          for (i = 0; (buf[i] != '\n') || (buf[i+1] != '@'); ++i) {
             // break if end
             if (i == ks->end) {
-fprintf(stderr, "Entering here!!!\n");
                ks->end = 0;
                return;
             }
@@ -179,6 +178,7 @@ fprintf(stderr, "Entering here!!!\n");
          if (iter || tid) {
             gzseek(ks->f, ((iter*thrds)+tid)*READ_SIZE - READ_IND_SIZE, SEEK_SET);
             gzread(ks->f, tbuf, READ_IND_SIZE);
+            gzseek(ks->f, ((iter*thrds)+tid+1)*READ_SIZE, SEEK_SET);
             c = tbuf[READ_IND_SIZE-1];
          }
          i = -1;
@@ -186,7 +186,6 @@ fprintf(stderr, "Entering here!!!\n");
             for (i = 0; (buf[i] != '\n') || (buf[i+1] != '@'); ++i) {
                // break if end
                if (i == ks->end) {
-fprintf(stderr, "Entering here!!!\n");
                   ks->end = 0;
                   return;
                }
@@ -211,7 +210,7 @@ fprintf(stderr, "Entering here!!!\n");
          ks->begin = 0;
          ks->atend = false;
          ks->end = gzread(ks->f, ks->buf, READ_SIZE);
-     //    move_to_start(ks, iter, tid, thrds);
+         move_to_start(ks, iter, tid, thrds);
          if (ks->end < READ_SIZE) ks->is_eof = 1;
          if (ks->end == 0) return -1;
       }
@@ -239,7 +238,7 @@ fprintf(stderr, "Entering here!!!\n");
                ks->atend = false;
                ks->begin = 0;
                ks->end = gzread(ks->f, ks->buf, READ_SIZE);
-       //        move_to_start(ks, iter, tid, thrds);
+               move_to_start(ks, iter, tid, thrds);
                if (ks->end < READ_SIZE) ks->is_eof = 1;
                if (ks->end == 0) return -1;
             }
@@ -314,6 +313,16 @@ fprintf(stderr, "Entering here!!!\n");
       return seq->seq.l;
    }
 
+static void ComputeChecksum(char *buffer, int size, long* sum)
+{
+   int i;
+   for (i = 0; i < size; i++)
+   {
+      *sum += buffer[i] * (i + 1);
+   }
+   return;
+}
+
 int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seqs, int *n_avail, int mode, int trim_qual)
 {
 	bwa_seq_t *p;
@@ -341,6 +350,8 @@ int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seq
    }
 	n_seqs = 0;
    first = true;
+// err_fwrite("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", strlen("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), 1, stdout);
+// long cksm = 0;
 	while ((l = kseq_read1(seq, iter, tid, thrds, &first)) >= 0) {
 		if ((mode & BWA_MODE_CFY) && (seq->comment.l != 0)) {
 			// skip reads that are marked to be filtered by Casava
@@ -372,6 +383,10 @@ int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seq
 			}
 			l = seq->seq.l;
 		} else p->bc[0] = 0;
+/*
+if (n_seqs < 285)
+ComputeChecksum(seq->seq.s,seq->seq.l,&cksm);
+ */
 		p->tid = -1; // no assigned to a thread
 		p->full_len = p->clip_len = p->len = l;
 		n_tot += p->full_len;
@@ -402,6 +417,7 @@ int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seq
 	}
 	if (n_seqs && trim_qual >= 1)
 		fprintf(stderr, "[bwa_read_seq] %.1f%% bases are trimmed.\n", 100.0f * n_trimmed/n_tot);
+//fprintf(stderr, "%d tid: %d sequences: %d cksum: %lx\n", iter, tid, n_seqs, cksm);
 	return n_seqs;
 }
 

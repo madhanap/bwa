@@ -134,7 +134,7 @@ static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t 
 	w = 0;
 	for (i = 0; i != n_seqs; ++i) {
       bwt_aln1_t *taln;
-		if (i % opt->n_threads != tid) continue;
+//if (i % opt->n_threads != tid) continue;
 		bwa_seq_t *p = seqs + i;
 		p->sa = 0; p->type = BWA_TYPE_NO_MATCH; p->c1 = p->c2 = 0; p->n_aln = 0;
 		if (max_l < p->len) {
@@ -160,6 +160,16 @@ static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t 
 }
 
 static volatile int iter_count;
+
+static void ComputeChecksum(char *buffer, int size, long* sum)
+{
+   int i;
+   for (i = 0; i < size; i++)
+   {
+      *sum += buffer[i] * (i + 1);
+   }
+   return;
+}
 
 void bwa_cal_sa_reg_gap1(const char *prefix, pthread_barrier_t *barrier, int tid, int *n_seqs, bwa_seq_t **seqs, const char *fn_fa, const gap_opt_t *opt)
 {
@@ -187,24 +197,31 @@ void bwa_cal_sa_reg_gap1(const char *prefix, pthread_barrier_t *barrier, int tid
 	pthread_barrier_wait(barrier);
 
 	while ((n_seqs[tid] = bwa_read_seq(ks, iter_count, tid, opt->n_threads, &seqs[tid], &size_seqs, opt->mode, opt->trim_qual)) != 0) {
+
       // call the original bwa_cal_sa_reg_gap function to process the read inputs
       bwa_cal_sa_reg_gap(tid, bwt, n_seqs[tid], seqs[tid], opt);
 
       // barrier required here --- every thread but the first which has to write
-	   if(tid) pthread_barrier_wait(barrier);
+	   // if(tid) pthread_barrier_wait(barrier);
+	   pthread_barrier_wait(barrier);
 
       if (!tid) {
          // first thread writes all the output to maintain order
    		for (i = 0; i < opt->n_threads; ++i) {
+//fprintf(stderr,"%d tid: %d sequences: %d\n", iter_count, i, n_seqs[i]);
+//fprintf(stderr,"sequences: %d\n", n_seqs[i]);
             if (!n_seqs[i])
               continue;
             for (j = 0; j < n_seqs[i]; ++j) {
 		   	   bwa_seq_t *p = seqs[i] + j;
+/*
+long sum = 0;
+ComputeChecksum((char*)p->aln, sizeof(bwt_aln1_t)*p->n_aln, &sum);
+fprintf(stderr, "\t %d %d %lx\n", j, p->n_aln, sum);
+ */
 	   	   	err_fwrite(&p->n_aln, 4, 1, stdout);
    	   		if (p->n_aln) err_fwrite(p->aln, sizeof(bwt_aln1_t), p->n_aln, stdout);
             }
-            // barrier required here
-	         pthread_barrier_wait(barrier);
    		}
          ++iter_count;
       }
