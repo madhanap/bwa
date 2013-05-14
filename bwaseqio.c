@@ -350,8 +350,8 @@ int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seq
    }
 	n_seqs = 0;
    first = true;
-// err_fwrite("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", strlen("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), 1, stdout);
-// long cksm = 0;
+//err_fwrite("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", strlen("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), 1, stdout);
+//long cksm = 0;
 	while ((l = kseq_read1(seq, iter, tid, thrds, &first)) >= 0) {
 		if ((mode & BWA_MODE_CFY) && (seq->comment.l != 0)) {
 			// skip reads that are marked to be filtered by Casava
@@ -383,10 +383,7 @@ int bwa_read_seq(bwa_seqio_t *bs, int iter, int tid, int thrds, bwa_seq_t **_seq
 			}
 			l = seq->seq.l;
 		} else p->bc[0] = 0;
-/*
-if (n_seqs < 285)
-ComputeChecksum(seq->seq.s,seq->seq.l,&cksm);
- */
+//ComputeChecksum(seq->seq.s,seq->seq.l,&cksm);
 		p->tid = -1; // no assigned to a thread
 		p->full_len = p->clip_len = p->len = l;
 		n_tot += p->full_len;
