@@ -218,7 +218,7 @@ int local_iter = 0;
       if (!tid) count_i = 0;
       asm __volatile__("mfence" : : : "memory");
       if (!tid) proceed = false;
-      while (proceed);
+      while (proceed) asm("pause");
 
       if (!tid) {
          ++iter_count;
@@ -244,7 +244,7 @@ fprintf(stderr, "\t %d %d %lx\n", j, p->n_aln, sum);
       }
 
       // threads must wait here till the writes complete!
-	   while (count_i <= tid);
+	   while (count_i <= tid) asm("pause");
 //fprintf (stderr, "tid: %d\t count_i: %d\n", tid, count_i);
       term[tid] = false;
 
@@ -252,7 +252,7 @@ fprintf(stderr, "\t %d %d %lx\n", j, p->n_aln, sum);
       if (!tid) proceed = true;
 
       // all threads must synchronize here!
-      while (!proceed);
+      //while (!proceed) asm("pause");
 pthread_barrier_wait(barrier);
 	}
 
