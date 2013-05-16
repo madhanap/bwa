@@ -2,8 +2,7 @@
 #CXX=		g++
 CC=			icc
 CXX=		icpc
-#CFLAGS=		-g -Wall -I./zlib/install/include
-#CFLAGS=		-O2 -Wall -I./zlib/install/include
+#CFLAGS=		-g -Wall
 CFLAGS=		-O2 -Wall
 CXXFLAGS=	$(CFLAGS)
 AR=			ar

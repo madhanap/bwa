@@ -16,6 +16,8 @@
 #include <pthread.h>
 #endif
 
+#include <stdbool.h>
+
 gap_opt_t *gap_init_opt()
 {
 	gap_opt_t *o;
@@ -160,6 +162,9 @@ static void bwa_cal_sa_reg_gap(int tid, bwt_t *const bwt, int n_seqs, bwa_seq_t 
 }
 
 static volatile int iter_count;
+volatile int count_i;
+volatile bool proceed;
+volatile bool term[100];
 
 static void ComputeChecksum(char *buffer, int size, long* sum)
 {
@@ -175,7 +180,7 @@ void bwa_cal_sa_reg_gap1(const char *prefix, pthread_barrier_t *barrier, int tid
 {
 	bwt_t *bwt;
 	bwa_seqio_t *ks;
-	int i, j, size_seqs = 0;
+   int i, j, size_seqs = 0;
 
    iter_count = 0;
 
@@ -193,26 +198,35 @@ void bwa_cal_sa_reg_gap1(const char *prefix, pthread_barrier_t *barrier, int tid
 	   err_fwrite(opt, sizeof(gap_opt_t), 1, stdout);
    }
 
-   n_seqs[tid] = bwa_read_seq(ks, iter_count, tid, opt->n_threads, &seqs[tid], &size_seqs, opt->mode, opt->trim_qual);
+   n_seqs[tid] = bwa_read_seq1(ks, iter_count, tid, opt->n_threads, &seqs[tid], &size_seqs, opt->mode, opt->trim_qual);
 
    // all threads must synchronize here
+   proceed = true;
+   count_i = 0;
+   term[tid] = false;
 	pthread_barrier_wait(barrier);
+int local_iter = 0;
 
 	while (n_seqs[0] != 0) {
+++local_iter;
       // call the original bwa_cal_sa_reg_gap function to process the read inputs
       if (n_seqs[tid])
        bwa_cal_sa_reg_gap(tid, bwt, n_seqs[tid], seqs[tid], opt);
 
       // barrier required here --- every thread but the first which has to write
-	   // if(tid) pthread_barrier_wait(barrier);
-      if (!tid) ++iter_count;
-	   pthread_barrier_wait(barrier);
+      term[tid] = true;
+      if (!tid) count_i = 0;
+      asm __volatile__("mfence" : : : "memory");
+      if (!tid) proceed = false;
+      while (proceed);
 
       if (!tid) {
+         ++iter_count;
          // first thread writes all the output to maintain order
-   		for (i = 0; i < opt->n_threads; ++i) {
+   		for (i = 0; i < opt->n_threads; ++i, ++count_i) {
 //fprintf(stderr,"%d tid: %d sequences: %d\n", iter_count-1, i, n_seqs[i]);
 //fprintf(stderr,"%d sequences: %d\n", (opt->n_threads * (iter_count-1))+i, n_seqs[i]);
+            while(!term[i]);
             if (!n_seqs[i])
               continue;
             for (j = 0; j < n_seqs[i]; ++j) {
@@ -226,15 +240,20 @@ fprintf(stderr, "\t %d %d %lx\n", j, p->n_aln, sum);
    	   		if (p->n_aln) err_fwrite(p->aln, sizeof(bwt_aln1_t), p->n_aln, stdout);
             }
    		}
+//err_fwrite("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", strlen("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), 1, stdout);
       }
 
-      // all threads must synchronize here!
-	   pthread_barrier_wait(barrier);
+      // threads must wait here till the writes complete!
+	   while (count_i <= tid);
+//fprintf (stderr, "tid: %d\t count_i: %d\n", tid, count_i);
+      term[tid] = false;
 
-      n_seqs[tid] = bwa_read_seq(ks, iter_count, tid, opt->n_threads, &seqs[tid], &size_seqs, opt->mode, opt->trim_qual);
+      n_seqs[tid] = bwa_read_seq1(ks, iter_count, tid, opt->n_threads, &seqs[tid], &size_seqs, opt->mode, opt->trim_qual);
+      if (!tid) proceed = true;
 
       // all threads must synchronize here!
-	   pthread_barrier_wait(barrier);
+      while (!proceed);
+pthread_barrier_wait(barrier);
 	}
 
 	// destroy

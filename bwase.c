@@ -591,9 +591,6 @@ void bwa_sai2sam_se_core(const char *prefix, const char *fn_sa, const char *fn_f
 	FILE *fp_sa;
 	gap_opt_t opt;
 
- fprintf(stderr, "Entering bwa_sai2sam_se_core! - Quiting program\n");
- exit(0);
-
 	// initialization
 	bwase_initialize();
 	bns = bns_restore(prefix);
