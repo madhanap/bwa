@@ -16,7 +16,7 @@ AOBJS=		QSufSort.o bwt_gen.o \
 			bwtsw2_chain.o fastmap.o bwtsw2_pair.o
 PROG=		bwa
 INCLUDES=	
-LIBS=		-L./zlib/install/lib -lm -lz -lpthread
+LIBS=		-lm -lz -lpthread
 SUBDIRS=	.
 
 .SUFFIXES:.c .o .cc
